@@ -1,0 +1,19 @@
+[package]
+name = "rust-omfiles-tools"
+version = "0.1.0"
+edition = "2024"
+description = "Tools for working with Open-Meteo files"
+license = "GPL-2.0-only"
+keywords = ["open-meteo", "weather", "forecast"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+omfiles-rs = { git = "https://github.com/open-meteo/rust-omfiles", branch = "main"}
+
+[[bin]]
+name = "omdump"
+path = "src/bin/omdump.rs"
+
+[profile.dist]
+inherits = "release"
+lto = "thin"
