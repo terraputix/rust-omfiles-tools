@@ -9,10 +9,16 @@ categories = ["command-line-utilities"]
 
 [dependencies]
 omfiles-rs = { git = "https://github.com/open-meteo/rust-omfiles", branch = "main"}
+ndarray = "0.16.1"
+eframe = "0.22.0"
 
 [[bin]]
 name = "omdump"
 path = "src/bin/omdump.rs"
+
+[[bin]]
+name = "omview"
+path = "src/bin/omview.rs"
 
 [profile.dist]
 inherits = "release"
