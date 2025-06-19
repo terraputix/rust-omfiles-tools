@@ -20,6 +20,10 @@ path = "src/bin/omdump.rs"
 name = "omview"
 path = "src/bin/omview.rs"
 
+[[bin]]
+name = "om_temporal_to_spatial"
+path = "src/bin/om_temporal_to_spatial.rs"
+
 [profile.dist]
 inherits = "release"
 lto = "thin"
