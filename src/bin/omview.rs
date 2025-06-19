@@ -3,13 +3,30 @@ use omfiles_rs::io::reader::OmFileReader;
 use std::env;
 use std::sync::Arc;
 
+#[derive(Clone, Copy, Debug)]
+enum ChunkingMode {
+    Spatial,
+    Temporal,
+}
+
+impl ChunkingMode {
+    fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "spatial" => Some(ChunkingMode::Spatial),
+            "temporal" => Some(ChunkingMode::Temporal),
+            _ => None,
+        }
+    }
+}
+
 struct DataLoader {
     reader: OmFileReader<omfiles_rs::backend::mmapfile::MmapFile>,
     n_timestamps: u64,
+    chunking: ChunkingMode,
 }
 
 impl DataLoader {
-    fn new(file_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(file_path: &str, chunking: ChunkingMode) -> Result<Self, Box<dyn std::error::Error>> {
         let reader = OmFileReader::from_file(file_path)?;
         let dims = reader.get_dimensions();
         let n_timestamps = *dims.last().unwrap();
@@ -17,6 +34,7 @@ impl DataLoader {
         Ok(Self {
             reader,
             n_timestamps,
+            chunking,
         })
     }
 
@@ -26,28 +44,34 @@ impl DataLoader {
     ) -> Result<ndarray::ArrayBase<ndarray::OwnedRepr<f32>, ndarray::Ix2>, Box<dyn std::error::Error>>
     {
         let dims = self.reader.get_dimensions();
-        println!("dims: {:?}", dims);
-        let ranges = dims
-            .iter()
-            .enumerate()
-            .map(|(i, &dim)| {
-                if i == dims.len() - 1 {
-                    // FOR NOW: last dimension is timestamp
-                    timestamp..timestamp + 1
-                } else {
-                    // ASSUME: this is a spatial dimension
-                    0..dim
+        let (rows, cols, ranges) = match self.chunking {
+            ChunkingMode::Temporal => {
+                // [lat, lon, time]
+                let mut ranges = vec![];
+                for (i, &dim) in dims.iter().enumerate() {
+                    if i == dims.len() - 1 {
+                        ranges.push(timestamp..timestamp + 1);
+                    } else {
+                        ranges.push(0..dim);
+                    }
                 }
-            })
-            .collect::<Vec<_>>();
-
-        println!("ranges: {:?}", ranges);
+                (dims[0] as usize, dims[1] as usize, ranges)
+            }
+            ChunkingMode::Spatial => {
+                // [time, lat, lon]
+                let mut ranges = vec![];
+                for (i, &dim) in dims.iter().enumerate() {
+                    if i == 0 {
+                        ranges.push(timestamp..timestamp + 1);
+                    } else {
+                        ranges.push(0..dim);
+                    }
+                }
+                (dims[1] as usize, dims[2] as usize, ranges)
+            }
+        };
 
         let nd_data = self.reader.read::<f32>(&ranges, None, None)?;
-
-        // Reshape into proper 2d array if possible
-        let rows = dims[0] as usize;
-        let cols = dims[1] as usize;
         let result = nd_data
             .squeeze()
             .into_shape_clone(ndarray::Ix2(rows, cols))?;
@@ -203,13 +227,53 @@ fn viridis_color(v: f32) -> RGBColor {
     RGBColor(r as u8, g as u8, b as u8)
 }
 
+fn print_usage_and_exit(program: &str) -> ! {
+    eprintln!(
+        "Usage: {} <omfile> [--chunking spatial|temporal]\n\
+         Default is temporal chunking (last (and fast) dimension is time).",
+        program
+    );
+    std::process::exit(1);
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: {} <omfile>", args[0]);
-        std::process::exit(1);
+        print_usage_and_exit(&args[0]);
     }
-    let data_loader = Arc::new(DataLoader::new(&args[1]).unwrap());
+
+    let mut chunking = ChunkingMode::Temporal;
+    let mut omfile = None;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--chunking" => {
+                i += 1;
+                if i >= args.len() {
+                    print_usage_and_exit(&args[0]);
+                }
+                chunking = ChunkingMode::from_str(&args[i]).unwrap_or_else(|| {
+                    eprintln!("Invalid chunking mode: {}", args[i]);
+                    print_usage_and_exit(&args[0]);
+                });
+            }
+            s if omfile.is_none() => {
+                omfile = Some(s.to_string());
+            }
+            _ => {
+                print_usage_and_exit(&args[0]);
+            }
+        }
+        i += 1;
+    }
+
+    let omfile = omfile.unwrap_or_else(|| {
+        print_usage_and_exit(&args[0]);
+    });
+
+    let data_loader =
+        Arc::new(DataLoader::new(&omfile, chunking).expect("Could not init DataLoader"));
 
     let native_options = eframe::NativeOptions {
         ..Default::default()
