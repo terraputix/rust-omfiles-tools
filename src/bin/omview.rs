@@ -1,5 +1,7 @@
+use eframe::egui::load::SizedTexture;
 use eframe::egui::{self, CentralPanel, TopBottomPanel};
-use omfiles_rs::io::reader::OmFileReader;
+use omfiles::reader::OmFileReader;
+use omfiles::traits::OmArrayVariable;
 use std::env;
 use std::sync::Arc;
 
@@ -20,7 +22,7 @@ impl ChunkingMode {
 }
 
 struct DataLoader {
-    reader: OmFileReader<omfiles_rs::backend::mmapfile::MmapFile>,
+    reader: OmFileReader<omfiles::MmapFile>,
     n_timestamps: u64,
     chunking: ChunkingMode,
 }
@@ -28,8 +30,13 @@ struct DataLoader {
 impl DataLoader {
     fn new(file_path: &str, chunking: ChunkingMode) -> Result<Self, Box<dyn std::error::Error>> {
         let reader = OmFileReader::from_file(file_path)?;
-        let dims = reader.get_dimensions();
-        let n_timestamps = *dims.last().unwrap();
+        let n_timestamps = {
+            let array = reader
+                .expect_array()
+                .expect("Could not cast to ArrayReader.");
+            let dims = array.get_dimensions();
+            *dims.last().ok_or("Array has no dimensions")?
+        };
 
         Ok(Self {
             reader,
@@ -43,7 +50,11 @@ impl DataLoader {
         timestamp: u64,
     ) -> Result<ndarray::ArrayBase<ndarray::OwnedRepr<f32>, ndarray::Ix2>, Box<dyn std::error::Error>>
     {
-        let dims = self.reader.get_dimensions();
+        let array = self
+            .reader
+            .expect_array()
+            .expect("Could not cast to ArrayReader.");
+        let dims = array.get_dimensions();
         let (rows, cols, ranges) = match self.chunking {
             ChunkingMode::Temporal => {
                 // [lat, lon, time]
@@ -71,7 +82,7 @@ impl DataLoader {
             }
         };
 
-        let nd_data = self.reader.read::<f32>(&ranges, None, None)?;
+        let nd_data = array.read::<f32>(&ranges)?;
         let result = nd_data
             .squeeze()
             .into_shape_clone(ndarray::Ix2(rows, cols))?;
@@ -87,8 +98,6 @@ struct App {
 
 impl App {
     fn new(data_loader: Arc<DataLoader>) -> Result<Self, Box<dyn std::error::Error>> {
-        let dims = data_loader.reader.get_dimensions().to_vec();
-        println!("dimensions {:?}", dims);
         let initial_data = data_loader.get_timestamp_data(0)?;
 
         Ok(Self {
@@ -169,7 +178,7 @@ impl eframe::App for App {
                 .load_texture("heatmap", image, egui::TextureOptions::NEAREST);
 
             // Show the image, scaling to fit the available space
-            let image_response = ui.image(&texture, ui.available_size());
+            let image_response = ui.image(SizedTexture::new(&texture, ui.available_size()));
 
             // Only proceed if hovered
             if image_response.hovered() {
@@ -282,10 +291,9 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     eframe::run_native(
         "Heatmap Viewer",
         native_options,
-        Box::new(move |_cc| {
-            let app = App::new(data_loader.clone()).unwrap();
-            Box::new(app) as Box<dyn eframe::App>
-        }),
+        Box::new(
+            |_cc| Ok(Box::new(App::new(data_loader.clone()).unwrap()) as Box<dyn eframe::App>),
+        ),
     )
     .unwrap();
 
