@@ -1,5 +1,5 @@
 [package]
-name = "rust-omfiles-tools"
+name = "omfiles-tools"
 version = "0.1.0"
 edition = "2024"
 description = "Tools for working with Open-Meteo files"
