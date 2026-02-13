@@ -1,5 +1,6 @@
-use omfiles_rs::io::reader::OmFileReader;
-use omfiles_rs::io::writer::OmFileWriter;
+use omfiles::reader::OmFileReader;
+use omfiles::traits::OmArrayVariable;
+use omfiles::writer::OmFileWriter;
 use std::env;
 use std::fs::File;
 use std::io;
@@ -18,6 +19,8 @@ fn main() -> io::Result<()> {
     // Read data from the input OM file
     let reader = OmFileReader::from_file(input_file_path)
         .expect(&format!("Failed to open file: {}", input_file_path));
+
+    let reader = reader.expect_array().expect("Failed to cast to array");
 
     let dimensions = reader.get_dimensions();
     let chunks = reader.get_chunk_dimensions();
@@ -63,7 +66,7 @@ fn main() -> io::Result<()> {
     for t in 0..time_dim {
         // Read a time slice from the input file and convert dynamic array to 3D array
         let time_slice_data = reader
-            .read(&[0u64..lat_dim, 0u64..lon_dim, t..t + 1u64], None, None)
+            .read(&[0u64..lat_dim, 0u64..lon_dim, t..t + 1u64])
             .expect("Failed to read data")
             .into_shape_clone(ndarray::Ix3(lat_dim as usize, lon_dim as usize, 1))
             .expect("Failed to convert to 3D array");

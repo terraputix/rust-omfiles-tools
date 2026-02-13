@@ -1,6 +1,10 @@
-use omfiles_rs::backend::mmapfile::MmapFile;
-use omfiles_rs::errors::OmFilesRsError;
-use omfiles_rs::io::reader::OmFileReader;
+use omfiles::MmapFile;
+use omfiles::OmFilesError;
+use omfiles::reader::OmFileArray;
+use omfiles::reader::OmFileReader;
+use omfiles::traits::OmArrayVariable;
+use omfiles::traits::OmFileReadable;
+use omfiles::traits::OmFileVariable;
 use std::env;
 use std::ops::Range;
 
@@ -8,47 +12,52 @@ use std::ops::Range;
 fn print_variable_info(reader: &OmFileReader<MmapFile>, indent: usize, path: &str) {
     let indent_str = " ".repeat(indent);
 
-    let variable_name = reader.get_name().unwrap_or_else(|| "unnamed".to_string());
+    let variable_name = reader.name();
     let variable_data_type = reader.data_type();
-    let variable_compression = reader.compression();
 
-    // Get dimensions
-    let variable_dimensions = reader.get_dimensions();
-    let dims_str = variable_dimensions
-        .iter()
-        .map(|d| d.to_string())
-        .collect::<Vec<_>>()
-        .join(" × ");
-
-    // Get chunks
-    let chunks = reader.get_chunk_dimensions();
-    let chunks_str = if !chunks.is_empty() {
-        chunks
-            .iter()
-            .map(|c| c.to_string())
-            .collect::<Vec<_>>()
-            .join(" × ")
-    } else {
-        "none".to_string()
-    };
-
-    // Print information
+    // Print common information
     println!("{}Variable: {}", indent_str, path);
-    println!("{}  Name: {}", indent_str, variable_name);
+    println!("{}  Name: {:?}", indent_str, variable_name);
     println!("{}  Type: {:?}", indent_str, variable_data_type);
-    println!("{}  Compression: {:?}", indent_str, variable_compression);
-    println!("{}  Dimensions: [{}]", indent_str, dims_str);
-    println!("{}  Chunks: [{}]", indent_str, chunks_str);
+
+    // Only print array-specific information if it can be cast as an array
+    if let Ok(array) = reader.expect_array() {
+        let variable_compression = array.compression();
+
+        // Get dimensions
+        let variable_dimensions = array.get_dimensions();
+        let dims_str = variable_dimensions
+            .iter()
+            .map(|d| d.to_string())
+            .collect::<Vec<_>>()
+            .join(" × ");
+
+        // Get chunks
+        let chunks = array.get_chunk_dimensions();
+        let chunks_str = if !chunks.is_empty() {
+            chunks
+                .iter()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join(" × ")
+        } else {
+            "none".to_string()
+        };
+
+        println!("{}  Compression: {:?}", indent_str, variable_compression);
+        println!("{}  Dimensions: [{}]", indent_str, dims_str);
+        println!("{}  Chunks: [{}]", indent_str, chunks_str);
+    }
 
     // Process children recursively
     let num_children = reader.number_of_children();
     for i in 0..num_children {
-        if let Some(child) = reader.get_child(i) {
-            let child_name = child.get_name().unwrap_or_else(|| format!("child_{}", i));
+        if let Some(child) = reader.get_child_by_index(i) {
+            let child_name = child.name();
             let child_path = if path.is_empty() {
-                child_name.clone()
+                child_name
             } else {
-                format!("{}/{}", path, child_name)
+                &format!("{}/{}", path, child_name)
             };
             print_variable_info(&child, indent + 2, &child_path);
         }
@@ -87,19 +96,17 @@ fn print_usage(program: &str) {
 }
 
 fn print_variable_data(
-    variable: &OmFileReader<MmapFile>,
+    variable: &OmFileArray<MmapFile>,
     ranges: &Vec<Range<u64>>,
-) -> Result<(), OmFilesRsError> {
+) -> Result<(), OmFilesError> {
     // Only f32 is supported here, but we could extend this with a match on variable.data_type()
-    let data = variable
-        .read::<f32>(&ranges, None, None)
-        .expect("Failed to read data");
+    let data = variable.read::<f32>(&ranges).expect("Failed to read data");
 
     println!("{:?}", data);
     Ok(())
 }
 
-fn main() -> Result<(), OmFilesRsError> {
+fn main() -> Result<(), OmFilesError> {
     let args: Vec<String> = env::args().collect();
 
     if args.len() == 2 {
@@ -127,26 +134,20 @@ fn main() -> Result<(), OmFilesRsError> {
 
         if !path_parts.is_empty() {
             // Check if the first path part refers to the root variable itself
-            let root_name = variable.get_name();
+            let root_name = variable.name();
             let first = path_parts[0];
 
-            let root_matches = match &root_name {
-                Some(name) if name == first => true,
-                None if first == "unnamed" || first == "child_0" => true,
-                _ => false,
-            };
+            let root_matches = root_name == first || first == "unnamed" || first == "child_0";
 
             if root_matches {
-                // The root is the target or the starting point for further traversal
                 path_parts.remove(0);
             }
 
-            // Traverse remaining path parts as children
             for part in path_parts {
                 let mut found = false;
                 for i in 0..variable.number_of_children() {
-                    if let Some(child) = variable.get_child(i) {
-                        let name = child.get_name();
+                    if let Some(child) = variable.get_child_by_index(i) {
+                        let name = child.name();
                         if part.starts_with("child_") {
                             if let Ok(idx) = part["child_".len()..].parse::<u32>() {
                                 if idx == i {
@@ -155,11 +156,11 @@ fn main() -> Result<(), OmFilesRsError> {
                                     break;
                                 }
                             }
-                        } else if part == "unnamed" && name.is_none() {
+                        } else if part == "unnamed" && name.is_empty() {
                             variable = child;
                             found = true;
                             break;
-                        } else if name.as_deref() == Some(part) {
+                        } else if name == part {
                             variable = child;
                             found = true;
                             break;
@@ -174,23 +175,28 @@ fn main() -> Result<(), OmFilesRsError> {
             }
         }
 
-        let dims = variable.get_dimensions();
-        println!("dimensions: {:?}", dims);
-        println!("chunk_dimensions: {:?}", variable.get_chunk_dimensions());
+        // Only attempt to read data if the target is an array
+        if let Ok(array) = variable.expect_array() {
+            let dims = array.get_dimensions();
+            println!("dimensions: {:?}", dims);
+            println!("chunk_dimensions: {:?}", array.get_chunk_dimensions());
 
-        if ranges.len() != dims.len() || ranges.iter().any(|r| r.is_none()) {
-            eprintln!(
-                "Number of valid ranges ({}) doesn't match number of dimensions ({}), or invalid range format.",
-                ranges.iter().filter(|r| r.is_some()).count(),
-                dims.len()
-            );
-            print_usage(&args[0]);
+            if ranges.len() != dims.len() || ranges.iter().any(|r| r.is_none()) {
+                eprintln!(
+                    "Number of valid ranges ({}) doesn't match number of dimensions ({}), or invalid range format.",
+                    ranges.iter().filter(|r| r.is_some()).count(),
+                    dims.len()
+                );
+                print_usage(&args[0]);
+                return Ok(());
+            }
+
+            let ranges: Vec<Range<u64>> = ranges.into_iter().map(|r| r.unwrap()).collect();
+            return print_variable_data(&array, &ranges);
+        } else {
+            eprintln!("Error: The variable at '{}' is not an array.", var_path);
             return Ok(());
         }
-
-        let ranges: Vec<Range<u64>> = ranges.into_iter().map(|r| r.unwrap()).collect();
-
-        return print_variable_data(&variable, &ranges);
     } else {
         print_usage(&args[0]);
         return Ok(());

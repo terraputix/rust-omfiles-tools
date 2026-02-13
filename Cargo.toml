@@ -8,9 +8,9 @@ keywords = ["open-meteo", "weather", "forecast"]
 categories = ["command-line-utilities"]
 
 [dependencies]
-omfiles-rs = { git = "https://github.com/open-meteo/rust-omfiles", branch = "main"}
-ndarray = "0.16.1"
-eframe = "0.22.0"
+omfiles = { git = "https://github.com/open-meteo/rust-omfiles", branch = "main"}
+ndarray = "0.17.2"
+eframe = "0.33.3"
 
 [[bin]]
 name = "omdump"
