@@ -355,6 +355,46 @@ impl eframe::App for App {
                 if ui.button("Reset Zoom").clicked() {
                     self.viewport.reset();
                 }
+
+                // Right-aligned settings in the same top panel
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.invert_color_scale, "Invert");
+                        egui::ComboBox::from_label("Scaling")
+                            .selected_text(format!("{:?}", self.scaling_mode))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.scaling_mode,
+                                    ScalingMode::Linear,
+                                    "Linear",
+                                );
+                                ui.selectable_value(
+                                    &mut self.scaling_mode,
+                                    ScalingMode::Logarithmic,
+                                    "Logarithmic",
+                                );
+                                ui.selectable_value(
+                                    &mut self.scaling_mode,
+                                    ScalingMode::SymLog,
+                                    "Sym-Log",
+                                );
+                            });
+                        egui::ComboBox::from_label("Colormap")
+                            .selected_text(format!("{:?}", self.color_map))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.color_map,
+                                    ColorMap::Viridis,
+                                    "Viridis",
+                                );
+                                ui.selectable_value(
+                                    &mut self.color_map,
+                                    ColorMap::Grayscale,
+                                    "Grayscale",
+                                );
+                            });
+                    });
+                });
             });
             if let Some(ref err) = self.error_message {
                 ui.colored_label(egui::Color32::RED, err);
@@ -399,31 +439,6 @@ impl eframe::App for App {
                 });
             });
         }
-
-        TopBottomPanel::top("settings").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                egui::ComboBox::from_label("Colormap")
-                    .selected_text(format!("{:?}", self.color_map))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.color_map, ColorMap::Viridis, "Viridis");
-                        ui.selectable_value(&mut self.color_map, ColorMap::Grayscale, "Grayscale");
-                    });
-
-                egui::ComboBox::from_label("Scaling")
-                    .selected_text(format!("{:?}", self.scaling_mode))
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.scaling_mode, ScalingMode::Linear, "Linear");
-                        ui.selectable_value(
-                            &mut self.scaling_mode,
-                            ScalingMode::Logarithmic,
-                            "Logarithmic",
-                        );
-                        ui.selectable_value(&mut self.scaling_mode, ScalingMode::SymLog, "Sym-Log");
-                    });
-
-                ui.checkbox(&mut self.invert_color_scale, "Invert");
-            })
-        });
 
         CentralPanel::default().show(ctx, |ui| {
             if self.error_message.is_some() {
