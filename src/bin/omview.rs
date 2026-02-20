@@ -1,4 +1,3 @@
-use eframe::egui::load::SizedTexture;
 use eframe::egui::{self, CentralPanel, TopBottomPanel};
 use omfiles::MmapFile;
 use omfiles::reader::OmFileReader;
@@ -164,22 +163,150 @@ impl DataLoader {
     }
 }
 
+/// Represents the visible viewport in data coordinates.
+///
+/// Data coordinate system:
+/// - x: 0 = left column, data_cols = right edge
+/// - y: 0 = bottom row (data row 0), data_rows = top edge (data row N-1)
+///
+/// The image is rendered with data row 0 at the bottom (y-flipped), so:
+/// - Screen top corresponds to y_max (high data row index)
+/// - Screen bottom corresponds to y_min (low data row index)
+#[derive(Clone, Debug)]
+struct Viewport {
+    x_min: f64,
+    x_max: f64,
+    /// Bottom edge in data y coords (low row index)
+    y_min: f64,
+    /// Top edge in data y coords (high row index)
+    y_max: f64,
+    data_cols: f64,
+    data_rows: f64,
+}
+
+impl Viewport {
+    fn new(rows: u64, cols: u64) -> Self {
+        Self {
+            x_min: 0.0,
+            x_max: cols as f64,
+            y_min: 0.0,
+            y_max: rows as f64,
+            data_cols: cols as f64,
+            data_rows: rows as f64,
+        }
+    }
+
+    fn width(&self) -> f64 {
+        self.x_max - self.x_min
+    }
+
+    fn height(&self) -> f64 {
+        self.y_max - self.y_min
+    }
+
+    fn zoom_level(&self) -> f64 {
+        self.data_cols / self.width()
+    }
+
+    /// Zoom by a factor centered on a point in data coordinates.
+    fn zoom(&mut self, factor: f64, center_x: f64, center_y: f64) {
+        let new_width = (self.width() / factor).max(1.0).min(self.data_cols);
+        let new_height = (self.height() / factor).max(1.0).min(self.data_rows);
+
+        let fx = (center_x - self.x_min) / self.width();
+        let fy = (center_y - self.y_min) / self.height();
+
+        self.x_min = center_x - fx * new_width;
+        self.x_max = center_x + (1.0 - fx) * new_width;
+        self.y_min = center_y - fy * new_height;
+        self.y_max = center_y + (1.0 - fy) * new_height;
+
+        self.clamp();
+    }
+
+    /// Pan by delta in data coordinates.
+    fn pan(&mut self, dx: f64, dy: f64) {
+        self.x_min += dx;
+        self.x_max += dx;
+        self.y_min += dy;
+        self.y_max += dy;
+        self.clamp();
+    }
+
+    fn reset(&mut self) {
+        self.x_min = 0.0;
+        self.x_max = self.data_cols;
+        self.y_min = 0.0;
+        self.y_max = self.data_rows;
+    }
+
+    fn clamp(&mut self) {
+        let w = self.width();
+        let h = self.height();
+
+        if self.x_min < 0.0 {
+            self.x_min = 0.0;
+            self.x_max = w.min(self.data_cols);
+        }
+        if self.x_max > self.data_cols {
+            self.x_max = self.data_cols;
+            self.x_min = (self.data_cols - w).max(0.0);
+        }
+        if self.y_min < 0.0 {
+            self.y_min = 0.0;
+            self.y_max = h.min(self.data_rows);
+        }
+        if self.y_max > self.data_rows {
+            self.y_max = self.data_rows;
+            self.y_min = (self.data_rows - h).max(0.0);
+        }
+    }
+
+    /// Convert a screen position within the image rect to data coordinates.
+    ///
+    /// Screen x maps linearly to data x: left → x_min, right → x_max.
+    /// Screen y is INVERTED: top → y_max (high row), bottom → y_min (low row).
+    /// This matches the image rendering where row 0 is at the bottom.
+    fn screen_to_data(&self, pos: egui::Pos2, rect: egui::Rect) -> (f64, f64) {
+        let fx = ((pos.x - rect.left()) / rect.width()) as f64;
+        let fy = ((pos.y - rect.top()) / rect.height()) as f64;
+        let data_x = self.x_min + fx * self.width();
+        // Invert y: screen top (fy=0) → y_max, screen bottom (fy=1) → y_min
+        let data_y = self.y_max - fy * self.height();
+        (data_x, data_y)
+    }
+
+    /// Convert a screen drag delta to data coordinate deltas.
+    ///
+    /// Positive screen dx (drag right) should move viewport right → positive data dx.
+    /// Positive screen dy (drag down) should move viewport down → negative data dy (lower row indices).
+    fn screen_delta_to_data(&self, delta: egui::Vec2, rect: egui::Rect) -> (f64, f64) {
+        let dx = (delta.x as f64) * self.width() / rect.width() as f64;
+        // Invert y for the same reason as screen_to_data
+        let dy = -(delta.y as f64) * self.height() / rect.height() as f64;
+        (dx, dy)
+    }
+}
+
 struct App {
     data_loader: Arc<DataLoader>,
     current_timestamp: u64,
     plot_data: ndarray::ArrayBase<ndarray::OwnedRepr<f32>, ndarray::Ix2>,
     error_message: Option<String>,
+    viewport: Viewport,
 }
 
 impl App {
     fn new(data_loader: Arc<DataLoader>) -> Result<Self, Box<dyn std::error::Error>> {
         let initial_data = data_loader.get_timestamp_data(0)?;
+        let viewport = Viewport::new(data_loader.rows(), data_loader.cols());
 
         Ok(Self {
             data_loader,
             current_timestamp: 0,
             plot_data: initial_data,
             error_message: None,
+            viewport,
         })
     }
 
@@ -209,12 +336,16 @@ impl eframe::App for App {
                     String::new()
                 };
                 ui.label(format!(
-                    "{}Shape: {}×{} | {:?}",
+                    "{}Shape: {}×{} | {:?} | Zoom: {:.1}x",
                     var_label,
                     self.data_loader.rows(),
                     self.data_loader.cols(),
                     self.data_loader.chunking,
+                    self.viewport.zoom_level(),
                 ));
+                if ui.button("Reset Zoom").clicked() {
+                    self.viewport.reset();
+                }
             });
             if let Some(ref err) = self.error_message {
                 ui.colored_label(egui::Color32::RED, err);
@@ -291,10 +422,28 @@ impl eframe::App for App {
                 max_value - min_value
             };
 
-            let (rows, cols) = self.plot_data.dim();
-            let mut rgba_data = Vec::with_capacity(rows * cols * 4);
-            for y in (0..rows).rev() {
-                for x in 0..cols {
+            let (full_rows, full_cols) = self.plot_data.dim();
+
+            // Compute the pixel range to render from the viewport.
+            // Viewport y_min is the bottom (low row index), y_max is the top (high row index).
+            let vp = &self.viewport;
+            let x_start = (vp.x_min.floor() as usize).min(full_cols.saturating_sub(1));
+            let x_end = (vp.x_max.ceil() as usize).min(full_cols);
+            let y_start = (vp.y_min.floor() as usize).min(full_rows.saturating_sub(1));
+            let y_end = (vp.y_max.ceil() as usize).min(full_rows);
+
+            let view_cols = x_end - x_start;
+            let view_rows = y_end - y_start;
+
+            if view_cols == 0 || view_rows == 0 {
+                return;
+            }
+
+            let mut rgba_data = Vec::with_capacity(view_rows * view_cols * 4);
+            // First image row = top of screen = highest data row index (y_end - 1)
+            // Last image row = bottom of screen = lowest data row index (y_start)
+            for y in (y_start..y_end).rev() {
+                for x in x_start..x_end {
                     let value = self.plot_data[[y, x]];
                     if value.is_nan() {
                         rgba_data.push(30);
@@ -312,28 +461,67 @@ impl eframe::App for App {
                 }
             }
 
-            let image = egui::ColorImage::from_rgba_unmultiplied([cols, rows], &rgba_data);
+            let image =
+                egui::ColorImage::from_rgba_unmultiplied([view_cols, view_rows], &rgba_data);
             let texture = ui
                 .ctx()
                 .load_texture("heatmap", image, egui::TextureOptions::NEAREST);
 
-            let image_response = ui.image(SizedTexture::new(&texture, ui.available_size()));
+            // Use a Sense that captures both hover, click, and drag
+            let available = ui.available_size();
+            let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
 
-            if image_response.hovered() {
+            // Paint the texture into the allocated rect
+            ui.painter().image(
+                texture.id(),
+                rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+
+            // Handle scroll to zoom
+            if response.hovered() {
+                let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
+                if scroll_delta != 0.0 {
+                    let zoom_factor = if scroll_delta > 0.0 { 1.15 } else { 1.0 / 1.15 };
+                    if let Some(pointer_pos) = ui.ctx().pointer_hover_pos() {
+                        let (data_x, data_y) = self.viewport.screen_to_data(pointer_pos, rect);
+                        self.viewport.zoom(zoom_factor, data_x, data_y);
+                        ctx.request_repaint();
+                    }
+                }
+            }
+
+            // Handle drag to pan
+            if response.dragged() {
+                let delta = response.drag_delta();
+                // Convert screen delta to data delta and negate (drag moves content, not viewport)
+                let (dx, dy) = self.viewport.screen_delta_to_data(delta, rect);
+                self.viewport.pan(-dx, -dy);
+                ctx.request_repaint();
+            }
+
+            // Handle double-click to reset zoom
+            if response.double_clicked() {
+                self.viewport.reset();
+            }
+
+            // Hover tooltip showing data coordinates and value
+            if response.hovered() {
                 if let Some(pointer_pos) = ui.ctx().pointer_hover_pos() {
-                    let rect = image_response.rect;
-                    let x = ((pointer_pos.x - rect.left()) / rect.width() * cols as f32).floor()
-                        as usize;
-                    let y = ((pointer_pos.y - rect.top()) / rect.height() * rows as f32).floor()
-                        as usize;
+                    let (data_x, data_y) = self.viewport.screen_to_data(pointer_pos, rect);
+                    let x = data_x.floor() as isize;
+                    let y = data_y.floor() as isize;
 
-                    if x < cols && y < rows {
-                        let value = self.plot_data[[y, x]];
+                    if x >= 0 && y >= 0 && (x as usize) < full_cols && (y as usize) < full_rows {
+                        let xu = x as usize;
+                        let yu = y as usize;
+                        let value = self.plot_data[[yu, xu]];
                         ui.ctx().output_mut(|o| {
-                            o.cursor_icon = egui::CursorIcon::PointingHand;
+                            o.cursor_icon = egui::CursorIcon::Crosshair;
                         });
-                        image_response.on_hover_ui(|ui| {
-                            ui.label(format!("({}, {}): {:.4}", x, y, value));
+                        response.on_hover_ui(|ui| {
+                            ui.label(format!("({}, {}): {:.4}", xu, yu, value));
                         });
                     }
                 }
@@ -386,6 +574,11 @@ fn print_usage_and_exit(program: &str) -> ! {
          \n\
          Supports both 2D data (static image) and 3D data (with time slider).\n\
          For 2D data, the chunking mode is ignored.\n\
+         \n\
+         Controls:\n\
+         \x20 Scroll wheel         Zoom in/out (centered on cursor)\n\
+         \x20 Click + Drag         Pan the view\n\
+         \x20 Double-click         Reset zoom to fit all data\n\
          \n\
          Examples:\n\
          \x20 {0} weather.om\n\
