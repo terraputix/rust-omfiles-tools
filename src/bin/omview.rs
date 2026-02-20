@@ -3,6 +3,7 @@ use omfiles::MmapFile;
 use omfiles::reader::OmFileReader;
 use omfiles::traits::OmArrayVariable;
 use omfiles::traits::OmFileVariable;
+use omfiles_tools::colorscales::{ColorMap, ColorMapper, ScalingMode};
 use omfiles_tools::navigate;
 use std::env;
 use std::sync::Arc;
@@ -294,6 +295,11 @@ struct App {
     plot_data: ndarray::ArrayBase<ndarray::OwnedRepr<f32>, ndarray::Ix2>,
     error_message: Option<String>,
     viewport: Viewport,
+
+    // Color Scale Settings
+    color_map: ColorMap,
+    scaling_mode: ScalingMode,
+    invert_color_scale: bool,
 }
 
 impl App {
@@ -307,6 +313,9 @@ impl App {
             plot_data: initial_data,
             error_message: None,
             viewport,
+            color_map: ColorMap::Viridis,
+            scaling_mode: ScalingMode::Linear,
+            invert_color_scale: false,
         })
     }
 
@@ -391,6 +400,31 @@ impl eframe::App for App {
             });
         }
 
+        TopBottomPanel::top("settings").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_label("Colormap")
+                    .selected_text(format!("{:?}", self.color_map))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.color_map, ColorMap::Viridis, "Viridis");
+                        ui.selectable_value(&mut self.color_map, ColorMap::Grayscale, "Grayscale");
+                    });
+
+                egui::ComboBox::from_label("Scaling")
+                    .selected_text(format!("{:?}", self.scaling_mode))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.scaling_mode, ScalingMode::Linear, "Linear");
+                        ui.selectable_value(
+                            &mut self.scaling_mode,
+                            ScalingMode::Logarithmic,
+                            "Logarithmic",
+                        );
+                        ui.selectable_value(&mut self.scaling_mode, ScalingMode::SymLog, "Sym-Log");
+                    });
+
+                ui.checkbox(&mut self.invert_color_scale, "Invert");
+            })
+        });
+
         CentralPanel::default().show(ctx, |ui| {
             if self.error_message.is_some() {
                 return;
@@ -416,16 +450,16 @@ impl eframe::App for App {
                 .copied()
                 .fold(f32::NEG_INFINITY, f32::max);
 
-            let range = if (max_value - min_value).abs() < f32::EPSILON {
-                1.0
-            } else {
-                max_value - min_value
-            };
+            let mapper = ColorMapper::new(
+                self.color_map,
+                self.scaling_mode,
+                self.invert_color_scale,
+                min_value,
+                max_value,
+            );
 
             let (full_rows, full_cols) = self.plot_data.dim();
 
-            // Compute the pixel range to render from the viewport.
-            // Viewport y_min is the bottom (low row index), y_max is the top (high row index).
             let vp = &self.viewport;
             let x_start = (vp.x_min.floor() as usize).min(full_cols.saturating_sub(1));
             let x_end = (vp.x_max.ceil() as usize).min(full_cols);
@@ -440,24 +474,14 @@ impl eframe::App for App {
             }
 
             let mut rgba_data = Vec::with_capacity(view_rows * view_cols * 4);
-            // First image row = top of screen = highest data row index (y_end - 1)
-            // Last image row = bottom of screen = lowest data row index (y_start)
             for y in (y_start..y_end).rev() {
                 for x in x_start..x_end {
                     let value = self.plot_data[[y, x]];
-                    if value.is_nan() {
-                        rgba_data.push(30);
-                        rgba_data.push(30);
-                        rgba_data.push(30);
-                        rgba_data.push(255);
-                    } else {
-                        let normalized = (value - min_value) / range;
-                        let color = viridis_color(normalized);
-                        rgba_data.push(color.0);
-                        rgba_data.push(color.1);
-                        rgba_data.push(color.2);
-                        rgba_data.push(255);
-                    }
+                    let color = mapper.map_value(value);
+                    rgba_data.push(color.0);
+                    rgba_data.push(color.1);
+                    rgba_data.push(color.2);
+                    rgba_data.push(255);
                 }
             }
 
@@ -467,11 +491,9 @@ impl eframe::App for App {
                 .ctx()
                 .load_texture("heatmap", image, egui::TextureOptions::NEAREST);
 
-            // Use a Sense that captures both hover, click, and drag
             let available = ui.available_size();
             let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
 
-            // Paint the texture into the allocated rect
             ui.painter().image(
                 texture.id(),
                 rect,
@@ -479,7 +501,6 @@ impl eframe::App for App {
                 egui::Color32::WHITE,
             );
 
-            // Handle scroll to zoom
             if response.hovered() {
                 let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
                 if scroll_delta != 0.0 {
@@ -492,21 +513,17 @@ impl eframe::App for App {
                 }
             }
 
-            // Handle drag to pan
             if response.dragged() {
                 let delta = response.drag_delta();
-                // Convert screen delta to data delta and negate (drag moves content, not viewport)
                 let (dx, dy) = self.viewport.screen_delta_to_data(delta, rect);
                 self.viewport.pan(-dx, -dy);
                 ctx.request_repaint();
             }
 
-            // Handle double-click to reset zoom
             if response.double_clicked() {
                 self.viewport.reset();
             }
 
-            // Hover tooltip showing data coordinates and value
             if response.hovered() {
                 if let Some(pointer_pos) = ui.ctx().pointer_hover_pos() {
                     let (data_x, data_y) = self.viewport.screen_to_data(pointer_pos, rect);
@@ -532,32 +549,6 @@ impl eframe::App for App {
             });
         });
     }
-}
-
-struct RGBColor(pub u8, pub u8, pub u8);
-
-fn viridis_color(v: f32) -> RGBColor {
-    let v = v.clamp(0.0, 1.0);
-
-    let r = if v < 0.5 {
-        0.0
-    } else {
-        ((v - 0.5) * 2.0).powf(1.5) * 255.0
-    };
-
-    let g = if v < 0.4 {
-        v * 3.0 * 255.0
-    } else {
-        (1.0 - (v - 0.4) / 0.6) * 255.0
-    };
-
-    let b = if v < 0.7 {
-        255.0 * (1.0 - v.powf(0.5))
-    } else {
-        0.0
-    };
-
-    RGBColor(r as u8, g as u8, b as u8)
 }
 
 fn print_usage_and_exit(program: &str) -> ! {
