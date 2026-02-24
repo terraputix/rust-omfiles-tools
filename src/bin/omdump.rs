@@ -40,9 +40,57 @@ fn print_variable_info(reader: &OmFileReader<MmapFile>, indent: usize, path: &st
             "none".to_string()
         };
 
-        println!("{}  Compression: {:?}", indent_str, variable_compression);
+        let dim_ranges: Vec<Range<u64>> = variable_dimensions.iter().map(|&d| 0..d).collect();
+        let byte_range = array.get_byte_range::<f32>(&dim_ranges).unwrap();
+
+        // Helper to format byte counts as bytes, KB, or MB
+        let format_bytes = |bytes: u64| -> String {
+            const KB: f64 = 1024.0;
+            const MB: f64 = KB * 1024.0;
+            let b = bytes as f64;
+            if b >= MB {
+                format!("{:.2} MB", b / MB)
+            } else if b >= KB {
+                format!("{:.2} KB", b / KB)
+            } else {
+                format!("{} bytes", bytes)
+            }
+        };
+
+        let byte_count = byte_range.end - byte_range.start;
+        let byte_range_str = format!(
+            "{}..{} ({})",
+            byte_range.start,
+            byte_range.end,
+            format_bytes(byte_count)
+        );
+
+        // Compute compression factor: uncompressed_bytes / stored_bytes
+        let num_elements = variable_dimensions
+            .iter()
+            .fold(1u128, |acc, &d| acc.saturating_mul(d as u128));
+        let element_size = std::mem::size_of::<f32>() as u128;
+        let uncompressed_bytes = num_elements.saturating_mul(element_size);
+        let stored_bytes = (byte_range.end - byte_range.start) as u128;
+
+        let compression_factor_str = if stored_bytes > 0 {
+            let factor = (uncompressed_bytes as f64) / (stored_bytes as f64);
+            if factor.is_finite() {
+                format!("{:.2}×", factor)
+            } else {
+                "unknown".to_string()
+            }
+        } else {
+            "unknown".to_string()
+        };
+
         println!("{}  Dimensions: [{}]", indent_str, dims_str);
         println!("{}  Chunks: [{}]", indent_str, chunks_str);
+        println!("{}  Byte Range: [{}]", indent_str, byte_range_str);
+        println!(
+            "{}  Compression: {:?} (factor: {})",
+            indent_str, variable_compression, compression_factor_str
+        );
     }
 
     let num_children = reader.number_of_children();
